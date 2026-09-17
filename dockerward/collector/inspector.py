@@ -111,7 +111,7 @@ class ContainerInspector:
 
         # 4. Resource Constraints (cgroups)
         memory_bytes = int(host_config.get("Memory") or 0)
-        nano_cpus = int(host_config.get("NanoCPUs") or 0)
+        nano_cpus = int(host_config.get("NanoCpus") or host_config.get("NanoCPUs") or 0)
         cpu_quota = int(host_config.get("CpuQuota") or 0)
         cpu_period = int(host_config.get("CpuPeriod") or 0)
         pids_limit_raw = host_config.get("PidsLimit")
