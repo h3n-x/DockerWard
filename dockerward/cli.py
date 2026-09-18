@@ -6,11 +6,22 @@ import sys
 from rich.console import Console
 from rich.table import Table
 
+from rich.panel import Panel
+
 from dockerward import __version__
 from dockerward.collector.client import DockerClientManager, DockerConnectionError
 from dockerward.collector.inspector import ContainerInspector
+from dockerward.rules import PolicyEngine, Severity
 
 console = Console()
+
+SEVERITY_BADGES = {
+    Severity.CRITICAL: "[bold white on red] CRITICAL [/bold white on red]",
+    Severity.HIGH: "[bold red]HIGH[/bold red]",
+    Severity.MEDIUM: "[bold yellow]MEDIUM[/bold yellow]",
+    Severity.LOW: "[bold cyan]LOW[/bold cyan]",
+    Severity.INFO: "[dim]INFO[/dim]",
+}
 
 
 def format_bytes(num_bytes: int) -> str:
@@ -120,6 +131,112 @@ def cmd_inspect(inspector: ContainerInspector, target: str | None, as_json: bool
         return 1
 
 
+def cmd_audit(
+    inspector: ContainerInspector,
+    engine: PolicyEngine,
+    target: str | None,
+    as_json: bool,
+    min_severity_str: str | None,
+    fail_on_str: str | None,
+) -> int:
+    """Audit running containers against CIS benchmark security rules."""
+    try:
+        if target:
+            telemetry_list = [inspector.inspect_by_id_or_name(target)]
+        else:
+            telemetry_list = inspector.inspect_all(only_running=True)
+
+        if not telemetry_list:
+            console.print("[yellow]No active containers found running on the host.[/yellow]")
+            return 0
+
+        min_severity = Severity(min_severity_str) if min_severity_str else None
+        fail_on_severity = Severity(fail_on_str) if fail_on_str else None
+
+        all_findings: list[Finding] = []
+        container_results: list[tuple[Any, list[Finding]]] = []
+
+        for telemetry in telemetry_list:
+            findings = engine.audit_container(telemetry)
+            if min_severity:
+                findings = engine.filter_by_min_severity(findings, min_severity)
+            all_findings.extend(findings)
+            container_results.append((telemetry, findings))
+
+        if as_json:
+            summary = engine.get_summary(all_findings)
+            data = {
+                "scanned_containers": len(telemetry_list),
+                "summary": {sev.value: count for sev, count in summary.items()},
+                "findings": [f.model_dump() for f in all_findings],
+            }
+            console.print_json(json.dumps(data))
+        else:
+            for telemetry, findings in container_results:
+                if not findings:
+                    console.print(
+                        f"[bold green]✓ {telemetry.identity.name}[/bold green] "
+                        f"({telemetry.identity.short_id}): Conforms to audited security benchmarks."
+                    )
+                    console.print()
+                    continue
+
+                table = Table(
+                    title=(
+                        f"Security Audit: [bold cyan]{telemetry.identity.name}[/bold cyan] "
+                        f"({telemetry.identity.short_id}) — {len(findings)} Finding(s)"
+                    ),
+                    border_style="dim",
+                    header_style="bold magenta",
+                )
+                table.add_column("Rule ID", style="bold cyan", width=11)
+                table.add_column("Severity", width=12, justify="center")
+                table.add_column("CIS Benchmark", style="dim", width=22)
+                table.add_column("Finding & Description", style="white")
+                table.add_column("Remediation", style="green")
+
+                for f in findings:
+                    badge = SEVERITY_BADGES.get(f.severity, f.severity.value)
+                    title_desc = f"[bold]{f.title}[/bold]\n[dim]{f.description}[/dim]"
+                    table.add_row(f.rule_id, badge, f.benchmark_ref, title_desc, f.remediation)
+
+                console.print(table)
+                console.print()
+
+            # Executive Summary Panel
+            summary = engine.get_summary(all_findings)
+            summary_table = Table(box=None, show_header=False, pad_edge=False)
+            summary_table.add_column("Metric", style="bold white", width=26)
+            summary_table.add_column("Count", justify="right", width=10)
+
+            summary_table.add_row("Scanned Containers", str(len(telemetry_list)))
+            summary_table.add_row("Total Findings", f"[bold]{len(all_findings)}[/bold]")
+            summary_table.add_row("  [bold red]CRITICAL[/bold red]", str(summary[Severity.CRITICAL]))
+            summary_table.add_row("  [red]HIGH[/red]", str(summary[Severity.HIGH]))
+            summary_table.add_row("  [yellow]MEDIUM[/yellow]", str(summary[Severity.MEDIUM]))
+            summary_table.add_row("  [cyan]LOW[/cyan]", str(summary[Severity.LOW]))
+
+            console.print(
+                Panel(
+                    summary_table,
+                    title="[bold white]DockerWard Executive Security Summary[/bold white]",
+                    border_style="bright_blue",
+                    expand=False,
+                )
+            )
+
+        if fail_on_severity:
+            threshold_findings = engine.filter_by_min_severity(all_findings, fail_on_severity)
+            if threshold_findings:
+                return 1
+
+        return 0
+
+    except Exception as err:
+        console.print(f"[bold red]Audit error:[/bold red] {err}")
+        return 1
+
+
 def main() -> None:
     """CLI parser and router."""
     parser = argparse.ArgumentParser(
@@ -137,15 +254,35 @@ def main() -> None:
     inspect_p.add_argument("target", nargs="?", default=None, help="Container name or ID (optional)")
     inspect_p.add_argument("--json", action="store_true", help="Output raw telemetry as JSON")
 
+    # Command: audit
+    audit_p = subparsers.add_parser("audit", help="Audit container security posture against CIS benchmarks")
+    audit_p.add_argument("target", nargs="?", default=None, help="Container name or ID (optional)")
+    audit_p.add_argument("--json", action="store_true", help="Output audit findings as JSON")
+    audit_p.add_argument(
+        "--min-severity",
+        choices=["CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO"],
+        default=None,
+        help="Only display findings at or above this severity",
+    )
+    audit_p.add_argument(
+        "--fail-on",
+        choices=["CRITICAL", "HIGH", "MEDIUM", "LOW"],
+        default=None,
+        help="Exit with code 1 if any findings match or exceed this severity (useful for CI/CD)",
+    )
+
     args = parser.parse_args()
 
     client_mgr = DockerClientManager()
     inspector = ContainerInspector(client_mgr)
+    engine = PolicyEngine()
 
     if args.command == "ping":
         sys.exit(cmd_ping(client_mgr))
     elif args.command == "inspect":
         sys.exit(cmd_inspect(inspector, args.target, args.json))
+    elif args.command == "audit":
+        sys.exit(cmd_audit(inspector, engine, args.target, args.json, args.min_severity, args.fail_on))
     else:
         parser.print_help()
         sys.exit(0)
@@ -153,3 +290,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
