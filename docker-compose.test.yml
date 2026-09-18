@@ -1,0 +1,47 @@
+# DockerWard Security Testbed
+# 3 intentionally configured containers for security posture and runtime inspection:
+#
+# 1. ward-victim-privileged : CRITICAL risk (privileged, root, socket mounted, unconfined seccomp, host net)
+# 2. ward-victim-exposed    : HIGH risk (root, dangerous caps CAP_SYS_ADMIN/CAP_NET_ADMIN, no cgroup limits, host net)
+# 3. ward-victim-hardened   : SAFE CONTROL (non-root UID 1000, read-only rootfs, drop-all caps, strict cgroups)
+
+services:
+  ward-victim-privileged:
+    container_name: ward-victim-privileged
+    image: alpine:latest
+    command: ["sleep", "infinity"]
+    privileged: true
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:rw
+    security_opt:
+      - seccomp:unconfined
+    network_mode: host
+    restart: unless-stopped
+
+  ward-victim-exposed:
+    container_name: ward-victim-exposed
+    image: alpine:latest
+    command: ["sleep", "infinity"]
+    cap_add:
+      - SYS_ADMIN
+      - NET_ADMIN
+    network_mode: host
+    restart: unless-stopped
+
+  ward-victim-hardened:
+    container_name: ward-victim-hardened
+    image: alpine:latest
+    command: ["sleep", "infinity"]
+    user: "1000:1000"
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 128m
+    cpus: 0.5
+    pids_limit: 50
+    tmpfs:
+      - /tmp:rw,noexec,nosuid
+    network_mode: "none"
+    restart: unless-stopped
