@@ -106,32 +106,56 @@ def test_cmd_inspect_exception() -> None:
     assert cmd_inspect(inspector, target=None, as_json=False) == 1
 
 
-def test_cmd_audit_empty() -> None:
+def test_cmd_audit_empty(tmp_path: Any) -> None:
     inspector = MagicMock()
     inspector.inspect_all.return_value = []
     engine = PolicyEngine()
-    assert cmd_audit(inspector, engine, target=None, as_json=False, min_severity_str=None, fail_on_str=None) == 0
+    # table format
+    assert cmd_audit(inspector, engine, target=None, format_type="table") == 0
+    # sarif format with file output
+    sarif_file = tmp_path / "empty.sarif"
+    assert cmd_audit(inspector, engine, target=None, format_type="sarif", output_file=str(sarif_file)) == 0
+    assert sarif_file.exists()
+    # json format with file output
+    json_file = tmp_path / "empty.json"
+    assert cmd_audit(inspector, engine, target=None, format_type="json", output_file=str(json_file)) == 0
+    assert json_file.exists()
 
 
 def test_cmd_audit_hardened_container() -> None:
     inspector = MagicMock()
     inspector.inspect_by_id_or_name.return_value = create_sample_telemetry(name="safe-box", is_root=False)
     engine = PolicyEngine()
-    assert cmd_audit(inspector, engine, target="safe-box", as_json=False, min_severity_str=None, fail_on_str=None) == 0
+    assert cmd_audit(inspector, engine, target="safe-box", format_type="table") == 0
 
 
 def test_cmd_audit_vulnerable_container_table() -> None:
     inspector = MagicMock()
     inspector.inspect_all.return_value = [create_sample_telemetry(name="vuln-box", is_root=True)]
     engine = PolicyEngine()
-    assert cmd_audit(inspector, engine, target=None, as_json=False, min_severity_str=None, fail_on_str=None) == 0
+    assert cmd_audit(inspector, engine, target=None, format_type="table") == 0
 
 
-def test_cmd_audit_with_json_output() -> None:
+def test_cmd_audit_with_json_output(tmp_path: Any) -> None:
     inspector = MagicMock()
     inspector.inspect_all.return_value = [create_sample_telemetry(name="vuln-box", is_root=True)]
     engine = PolicyEngine()
-    assert cmd_audit(inspector, engine, target=None, as_json=True, min_severity_str="HIGH", fail_on_str=None) == 0
+    json_out = tmp_path / "test.json"
+    assert cmd_audit(
+        inspector, engine, target=None, format_type="json", output_file=str(json_out), min_severity_str="HIGH"
+    ) == 0
+    assert json_out.exists()
+
+
+def test_cmd_audit_with_sarif_output(tmp_path: Any) -> None:
+    inspector = MagicMock()
+    inspector.inspect_all.return_value = [create_sample_telemetry(name="vuln-box", is_root=True)]
+    engine = PolicyEngine()
+    sarif_out = tmp_path / "test.sarif"
+    assert cmd_audit(
+        inspector, engine, target=None, format_type="sarif", output_file=str(sarif_out)
+    ) == 0
+    assert sarif_out.exists()
 
 
 def test_cmd_audit_fail_on_threshold() -> None:
@@ -139,13 +163,13 @@ def test_cmd_audit_fail_on_threshold() -> None:
     inspector.inspect_all.return_value = [create_sample_telemetry(name="vuln-box", is_root=True)]
     engine = PolicyEngine()
     # Fails because vulnerable container has CRITICAL findings
-    ret = cmd_audit(inspector, engine, target=None, as_json=False, min_severity_str=None, fail_on_str="CRITICAL")
+    ret = cmd_audit(inspector, engine, target=None, format_type="table", fail_on_str="CRITICAL")
     assert ret == 1
 
     # Returns 0 if fail_on is higher than any findings (or when no findings meet threshold)
     clean_inspector = MagicMock()
     clean_inspector.inspect_all.return_value = [create_sample_telemetry(name="safe-box", is_root=False)]
-    clean_ret = cmd_audit(clean_inspector, engine, target=None, as_json=False, min_severity_str=None, fail_on_str="CRITICAL")
+    clean_ret = cmd_audit(clean_inspector, engine, target=None, format_type="table", fail_on_str="CRITICAL")
     assert clean_ret == 0
 
 
@@ -153,7 +177,7 @@ def test_cmd_audit_exception() -> None:
     inspector = MagicMock()
     inspector.inspect_all.side_effect = RuntimeError("Docker API timeout")
     engine = PolicyEngine()
-    assert cmd_audit(inspector, engine, target=None, as_json=False, min_severity_str=None, fail_on_str=None) == 1
+    assert cmd_audit(inspector, engine, target=None, format_type="table") == 1
 
 
 def test_main_cli_router(monkeypatch: pytest.MonkeyPatch) -> None:

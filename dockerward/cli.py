@@ -2,15 +2,16 @@
 
 import argparse
 import json
+from pathlib import Path
 import sys
 from rich.console import Console
-from rich.table import Table
-
 from rich.panel import Panel
+from rich.table import Table
 
 from dockerward import __version__
 from dockerward.collector.client import DockerClientManager, DockerConnectionError
 from dockerward.collector.inspector import ContainerInspector
+from dockerward.reporting.sarif import SarifExporter
 from dockerward.rules import PolicyEngine, Severity
 
 console = Console()
@@ -135,9 +136,10 @@ def cmd_audit(
     inspector: ContainerInspector,
     engine: PolicyEngine,
     target: str | None,
-    as_json: bool,
-    min_severity_str: str | None,
-    fail_on_str: str | None,
+    format_type: str = "table",
+    output_file: str | None = None,
+    min_severity_str: str | None = None,
+    fail_on_str: str | None = None,
 ) -> int:
     """Audit running containers against CIS benchmark security rules."""
     try:
@@ -147,7 +149,20 @@ def cmd_audit(
             telemetry_list = inspector.inspect_all(only_running=True)
 
         if not telemetry_list:
-            console.print("[yellow]No active containers found running on the host.[/yellow]")
+            if format_type == "table":
+                console.print("[yellow]No active containers found running on the host.[/yellow]")
+            elif format_type == "sarif":
+                empty_sarif = SarifExporter.to_json([])
+                if output_file:
+                    Path(output_file).write_text(empty_sarif, encoding="utf-8")
+                else:
+                    sys.stdout.write(empty_sarif + "\n")
+            elif format_type == "json":
+                empty_json = json.dumps({"scanned_containers": 0, "summary": {}, "findings": []}, indent=2)
+                if output_file:
+                    Path(output_file).write_text(empty_json, encoding="utf-8")
+                else:
+                    console.print_json(empty_json)
             return 0
 
         min_severity = Severity(min_severity_str) if min_severity_str else None
@@ -163,14 +178,28 @@ def cmd_audit(
             all_findings.extend(findings)
             container_results.append((telemetry, findings))
 
-        if as_json:
+        if format_type == "sarif":
+            sarif_str = SarifExporter.to_json(all_findings)
+            if output_file:
+                Path(output_file).write_text(sarif_str, encoding="utf-8")
+                console.print(f"[bold green]✓ SARIF 2.1.0 report saved to {output_file}[/bold green]")
+            else:
+                sys.stdout.write(sarif_str + "\n")
+
+        elif format_type == "json":
             summary = engine.get_summary(all_findings)
             data = {
                 "scanned_containers": len(telemetry_list),
                 "summary": {sev.value: count for sev, count in summary.items()},
                 "findings": [f.model_dump() for f in all_findings],
             }
-            console.print_json(json.dumps(data))
+            json_str = json.dumps(data, indent=2)
+            if output_file:
+                Path(output_file).write_text(json_str, encoding="utf-8")
+                console.print(f"[bold green]✓ JSON report saved to {output_file}[/bold green]")
+            else:
+                console.print_json(json_str)
+
         else:
             for telemetry, findings in container_results:
                 if not findings:
@@ -257,7 +286,22 @@ def main() -> None:
     # Command: audit
     audit_p = subparsers.add_parser("audit", help="Audit container security posture against CIS benchmarks")
     audit_p.add_argument("target", nargs="?", default=None, help="Container name or ID (optional)")
-    audit_p.add_argument("--json", action="store_true", help="Output audit findings as JSON")
+    audit_p.add_argument(
+        "-f",
+        "--format",
+        dest="format_type",
+        choices=["table", "json", "sarif"],
+        default="table",
+        help="Report output format: table (default), json, or sarif (OASIS SARIF v2.1.0)",
+    )
+    audit_p.add_argument(
+        "-o",
+        "--output",
+        dest="output_file",
+        default=None,
+        help="File path to save the report (e.g. results.sarif, report.json)",
+    )
+    audit_p.add_argument("--json", action="store_true", help="Shortcut for --format json")
     audit_p.add_argument(
         "--min-severity",
         choices=["CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO"],
@@ -282,7 +326,18 @@ def main() -> None:
     elif args.command == "inspect":
         sys.exit(cmd_inspect(inspector, args.target, args.json))
     elif args.command == "audit":
-        sys.exit(cmd_audit(inspector, engine, args.target, args.json, args.min_severity, args.fail_on))
+        fmt = "json" if args.json else args.format_type
+        sys.exit(
+            cmd_audit(
+                inspector,
+                engine,
+                args.target,
+                fmt,
+                args.output_file,
+                args.min_severity,
+                args.fail_on,
+            )
+        )
     else:
         parser.print_help()
         sys.exit(0)
